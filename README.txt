@@ -1,7 +1,7 @@
 Sans Q - installable web app
 
-Host this whole folder on any static web host that serves HTTPS
-(GitHub Pages, Netlify, Cloudflare Pages). Keep the files together.
+Upload all of these files, side by side, to any static web host that serves HTTPS
+(GitHub Pages, Netlify, Cloudflare Pages). There are no subfolders.
 
 Install on iPhone: open the site in Safari, tap Share, then Add to Home Screen.
 Install on Android: open the site in Chrome, then tap Install app (or menu > Add to Home screen).
