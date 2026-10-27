@@ -1,5 +1,5 @@
 // Sans Q service worker: caches the whole game so it works offline.
-const CACHE = "sansq-a9bb6d1f26";
+const CACHE = "sansq-936b8e705a";
 const ASSETS = ["./","index.html","manifest.webmanifest","icon-192.png","icon-512.png","maskable-512.png","apple-touch-icon.png"];
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ASSETS)).then(() => self.skipWaiting()));
