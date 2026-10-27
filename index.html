@@ -165,6 +165,8 @@ button.die, .cell.has { -webkit-touch-callout: none; }
 .ans.on { display: grid; place-items: center; background: var(--die); border: 1px solid var(--die-edge); border-radius: 4px; color: var(--die-fg); font: 700 0.9rem/1 var(--font-display); }
 header { align-items: center; gap: 10px; justify-content: flex-start; }
 .titleblock { flex: 1; min-width: 0; }
+.nowrap { white-space: nowrap; }
+.diffline { display: block; white-space: nowrap; }
 .stats { flex-direction: column; align-items: flex-end; gap: 0; font-size: 0.8rem; line-height: 1.35; }
 .iconbtn {
   flex: none; width: 40px; height: 40px; padding: 0; display: grid; place-items: center; cursor: pointer;
@@ -313,6 +315,7 @@ header { align-items: center; gap: 10px; justify-content: flex-start; }
       <li>Time breaks ties.</li>
     </ul>
     <h3>Daily and practice</h3>
+    <p>Each roll gets a difficulty from 1 to 10. The solver counts how many solutions it can find and compares that with 100 test rolls. Fewer solutions means a harder roll.</p>
     <p>Daily gives everyone the same dice each day. Practice gives a random roll. Switch between them in the menu.</p>
     <p>A solver checks every roll first, so a solution always exists. When you finish, compare your score with the solver's best, or tap Give up to see its answer.</p>
     <p class="fine">Words come from the NASPA (TWL) Scrabble word list.</p>
@@ -325,7 +328,8 @@ const WORD_LIST = "aah aahed aahing aahs aal aalii aaliis aals aardvark aardvark
 const WORDS = new Set(WORD_LIST);
 // Sans Q solver. Self-contained so it can be stringified into a Web Worker.
 // letters: array of 12 lowercase letters. dict: array of lowercase words.
-// opts.mode: "any" (stop at first full solution) or "best" (maximize score).
+// opts.mode: "any" (stop at first full solution), "best" (maximize score),
+// or "count" (count distinct full solutions within the node budget).
 // opts.maxNodes: deterministic node budget. opts.maxMs: wall-clock budget.
 function sansqSolve(letters, dict, opts) {
   opts = opts || {};
@@ -362,7 +366,7 @@ function sansqSolve(letters, dict, opts) {
   }
   const wpts = new Map(cand.map((w) => [w, pts(w)]));
   const order = cand.slice().sort((a, b) =>
-    mode === "any" ? (b.length - a.length || (a < b ? -1 : 1)) : (wpts.get(b) - wpts.get(a) || (a < b ? -1 : 1)));
+    mode !== "best" ? (b.length - a.length || (a < b ? -1 : 1)) : (wpts.get(b) - wpts.get(a) || (a < b ? -1 : 1)));
   const byLetter = Array.from({ length: 26 }, () => []);
   for (const w of order) for (let i = 0; i < w.length; i++) byLetter[w.charCodeAt(i) - A].push([w, i]);
 
@@ -373,6 +377,7 @@ function sansqSolve(letters, dict, opts) {
   let remTotal = total;
   const occ = [];
   let nodes = 0, best = null, stop = false, visited = new Set(), branch = Infinity;
+  const solutions = new Set();
 
   function perpOK(p, ch, pd) {
     let a = p - pd;
@@ -461,6 +466,7 @@ function sansqSolve(letters, dict, opts) {
     nodes++;
     if (nodes > maxNodes || ((nodes & 255) === 0 && Date.now() > deadline)) { stop = true; return; }
     if (remTotal === 0) {
+      if (mode === "count") solutions.add(key());
       const sc = boardScore();
       if (!best || sc.s > best.score) best = { score: sc.s, words: sc.words, cells: snapshot() };
       if (mode === "any") stop = true;
@@ -470,7 +476,7 @@ function sansqSolve(letters, dict, opts) {
     if (visited.has(k)) return;
     visited.add(k);
     const ms = moves();
-    if (mode === "any") ms.sort((a, b) => b.need - a.need);
+    if (mode !== "best") ms.sort((a, b) => b.need - a.need);
     else ms.sort((a, b) => wpts.get(b.w) - wpts.get(a.w) || b.need - a.need);
     const lim = Math.min(ms.length, branch);
     for (let i = 0; i < lim; i++) {
@@ -490,7 +496,7 @@ function sansqSolve(letters, dict, opts) {
       if (stop) return;
     }
   }
-  if (mode === "any") {
+  if (mode !== "best") {
     pass(Infinity);
   } else {
     // Widening passes: try only the best few moves per step first, then allow more.
@@ -501,7 +507,7 @@ function sansqSolve(letters, dict, opts) {
       if (stop) break;
     }
   }
-  return { found: !!best, best, nodes, candidates: cand.length, complete: !stop };
+  return { found: !!best, best, nodes, candidates: cand.length, complete: !stop, count: solutions.size };
 }
 
 
@@ -555,6 +561,7 @@ let note = "";          // one-shot status message
 let tilt = {};          // die id -> degrees, for dice not yet moved
 let rolling = false, flicker = null, settleT = null;
 let mode = "daily", gameDay = "", dayLabel = "", lastShare = "";
+let difficulty = null, lastSolve = null;
 let gameToken = 0, solverBest = null, solverState = "idle", lastTotal = 0, gaveUp = false, giveUpArmed = null;
 
 function shuffle(a) {
@@ -623,6 +630,15 @@ function startClock() {
 }
 const ANY_NODES = 6000;   // fixed budget, so every device picks the same daily roll
 const BEST_MS = 4000;
+// Difficulty: count distinct solutions within a fixed search budget, then compare with
+// the 10th..90th percentile counts from a 100-roll benchmark. Fewer solutions = harder.
+const COUNT_NODES = 3000;
+const DIFF_THRESHOLDS = [16, 34, 62, 96, 136, 189, 240, 372, 503];
+function difficultyFor(count) {
+  let k = 0;
+  for (const t of DIFF_THRESHOLDS) if (count > t) k++;
+  return 10 - k;
+}
 async function newGame(m) {
   if (m) mode = m;
   const token = ++gameToken;
@@ -632,7 +648,7 @@ async function newGame(m) {
   $("banner").classList.remove("show", "gaveup");
   $("ansWrap").hidden = true; $("showAnsBtn").textContent = "Show solver's answer";
   sel = null; solved = false; result = null; wordSel = null; history = []; note = "";
-  gaveUp = false; solverBest = null; solverState = "working"; disarmGiveUp();
+  gaveUp = false; solverBest = null; solverState = "working"; difficulty = null; disarmGiveUp();
   clearInterval(timer); clearInterval(flicker); clearTimeout(settleT);
   $("time").textContent = "0:00";
   resetWorker();
@@ -653,6 +669,12 @@ async function newGame(m) {
   if (!chosen) chosen = rollDice(rng);
   dice = chosen;
   solverBest = first;
+  runSolver(dice.map((x) => x.letter.toLowerCase()), { mode: "count", maxNodes: COUNT_NODES }).then((r) => {
+    if (token !== gameToken) return;
+    difficulty = difficultyFor(r.count);
+    if (!rolling) render();
+    if (solved) refreshShare();
+  });
   runSolver(dice.map((x) => x.letter.toLowerCase()), { mode: "best", maxMs: BEST_MS }).then((r) => {
     if (token !== gameToken) return;
     if (r.found && (!solverBest || r.best.score > solverBest.score)) solverBest = r.best;
@@ -867,9 +889,17 @@ function render(rollAnim) {
   if (solved) st.className = "status win";
   const b = loadBest();
   $("best").textContent = b ? b.score + " pts" : "-";
-  $("mode").textContent = mode === "daily" ? "Daily \u00b7 " + dayLabel : "Practice roll";
+  $("mode").textContent = (mode === "daily" ? "Daily \u00b7 " + dayLabel : "Practice roll") +
+    (rolling ? "" : " \u00b7 " + (difficulty ? difficulty + "/10" : "\u2026"));
 }
 
+function refreshShare() {
+  if (!lastSolve) return;
+  const v = lastSolve;
+  lastShare = (mode === "daily" ? "Sans Q daily, " + dayLabel : "Sans Q practice") +
+    (difficulty ? " (difficulty " + difficulty + "/10)" : "") + "\n" +
+    v.total + " points, " + v.words + " words, " + fmt(v.time) + "\nLongest word: " + v.longest + " letters";
+}
 function copyResult() {
   const pre = $("shareText"), btn = $("copyBtn");
   pre.textContent = lastShare;
@@ -914,8 +944,8 @@ function check() {
       bd.appendChild(c);
     });
     const longest = Math.max(...scored.map((w) => w.word.length));
-    lastShare = (mode === "daily" ? "Sans Q daily, " + dayLabel : "Sans Q practice") + "\n" +
-      total + " points, " + scored.length + " words, " + fmt(s) + "\nLongest word: " + longest + " letters";
+    lastSolve = { total, words: scored.length, time: s, longest };
+    refreshShare();
     lastTotal = total;
     $("banner").classList.add("show");
     updateSolverInfo();
